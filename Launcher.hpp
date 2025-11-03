@@ -40,7 +40,6 @@ required_hardware:
 depends:
   - qdu-future/CMD
   - qdu-future/Motor
-
 === END MANIFEST === */
 // clang-format on
 
