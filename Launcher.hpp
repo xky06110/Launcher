@@ -27,8 +27,6 @@ constructor_args:
   - num_trig_tooth: 0.0
   - trig_gear_ratio: 0.0
   - fric_radius: 0.0
-  - cover_open_duty: 0.0
-  - cover_close_duty: 0.0
   - default_bullet_speed: 0.0
   - min_launch_delay: 0.0
 template_args:
@@ -43,7 +41,6 @@ depends:
 === END MANIFEST === */
 // clang-format on
 
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -51,6 +48,8 @@ depends:
 #include "Eigen/Core"
 #include "Motor.hpp"
 #include "app_framework.hpp"
+#include "libxr_def.hpp"
+#include "libxr_time.hpp"
 #include "pid.hpp"
 #define LAUNCHER_TRIG_SPEED_MAX (16000.0f)
 
@@ -82,15 +81,19 @@ class Launcher : public LibXR::Application {
            LibXR::PID<float>::Param pid_param_fric,
            Motor<MotorType> &motor_can1, Motor<MotorType> &motor_can2,
            float num_trig_tooth, float trig_gear_ratio, float fric_radius,
-           float cover_open_duty, float cover_close_duty,
-           float default_bullet_speed, uint32_t min_launch_delaye)
-      : motor_can2_(motor_can2),
+           float default_bullet_speed, uint32_t min_launch_delay)
+      : min_launch_delay_(min_launch_delay),
+        default_bullet_speed_(default_bullet_speed),
+        fric_radius_(fric_radius),
+        trig_gear_ratio_(trig_gear_ratio),
+        num_trig_tooth_(num_trig_tooth),
+        motor_can2_(motor_can2),
         motor_can1_(motor_can1),
         pid_fric_(pid_param_fric),
         pid_trig_(pid_param_trig),
-        cmd_(cmd)
-
-  {
+        cmd_(cmd) {
+    UNUSED(hw);
+    UNUSED(app);
     thread_.Create(this, ThreadFunction, "LauncherThread", task_stack_depth,
                    LibXR::Thread::Priority::MEDIUM);
 
@@ -99,9 +102,9 @@ class Launcher : public LibXR::Application {
   }
 
   static void ThreadFunction(Launcher *launcher) {
-    auto now_ = LibXR::Timebase::GetMicroseconds();
-    launcher->dt_ = (now_ - launcher->last_online_time_);
-    launcher->last_online_time_ = now_;
+    auto now = LibXR::Timebase::GetMilliseconds();
+    launcher->dt_ = (now - launcher->last_online_time_).ToSecondf();
+    launcher->last_online_time_ = now;
 
     while (1) {
       launcher->semaphore_.Wait(UINT32_MAX);
@@ -110,7 +113,7 @@ class Launcher : public LibXR::Application {
       launcher->Control();
       launcher->SelfResolution();
 
-      //event_active 接受dr16 mode转变
+      // event_active 接受dr16 mode转变
     }
   }
 
@@ -134,45 +137,49 @@ class Launcher : public LibXR::Application {
   }
 
   void Control() {
-    const float output_trig_ = std::clamp(
+    const float OUTPUT_TRIG = std::clamp(
         pid_trig_.Calculate(target_angle_trig_,
                             now_angle_trig_ / LAUNCHER_TRIG_SPEED_MAX, dt_),
         0.0f, LAUNCHER_TRIG_SPEED_MAX);
 
-    float output_fric1_ = bullet_speed_to_fric_rpm(0, fric_radius_, 1);
-    float output_fric2_ = -output_fric1_;
+    float output_fric1 = BulletSpeedToFricRpm(0, fric_radius_, 1);
+    float output_fric2 = -output_fric1;
 
-    motor_can1_.SetCurrent(5, output_trig_);
-    motor_can2_.SetCurrent(2, output_fric1_);
-    motor_can2_.SetCurrent(3, output_fric2_);
+    motor_can1_.SetCurrent(5, OUTPUT_TRIG);
+    motor_can2_.SetCurrent(2, output_fric1);
+    motor_can2_.SetCurrent(3, output_fric2);
   }
 
-  float bullet_speed_to_fric_rpm(float bullet_speed, float fric_radius,
-                                 bool is17mm) {
+  float BulletSpeedToFricRpm(float bullet_speed, float fric_radius,
+                             bool is17mm) {
+    UNUSED(fric_radius);
+
     if (bullet_speed == 0.0f) {
-      return 0.f;
+      return 0.0f;
+    } else if (bullet_speed > 0.0f) {
+      if (is17mm) {
+        if (bullet_speed == 15.0f) {
+          return 4670.0f;
+        }
+        if (bullet_speed == 18.0f) {
+          return 5200.0f;
+        }
+        if (bullet_speed == 25.0f) {
+          return 7400.0f;
+        }
+      } else {
+        if (bullet_speed == 10.0f) {
+          return 4450.0f;
+        }
+        if (bullet_speed == 16.0f) {
+          return 5700.0f;
+        }
+      }
     }
-    if (is17mm) {
-      if (bullet_speed == 15.0f) {
-        return 4670.f;
-      }
-      if (bullet_speed == 18.0f) {
-        return 5200.f;
-      }
-      if (bullet_speed == 25.0f) {
-        return 7400.f;
-      }
-    } else {
-      if (bullet_speed == 10.0f) {
-        return 4450.f;
-      }
-      if (bullet_speed == 16.0f) {
-        return 5700.f;
-      }
-    }
+    return 0.0f;
   }
 
-    /**
+  /**
    * @brief 监控函数 (在此应用中未使用)
    *
    */
@@ -203,25 +210,21 @@ class Launcher : public LibXR::Application {
   float now_omega_trig2_ = 0.0f;
 
   float target_angle_trig_ = M_2PI / num_trig_tooth_;
-  float target_angle_fric_ = 0.0f;
-  // 摩擦轮转速
+
   float fric_rpm_ = 0.0f;
-  //! CAN2上的电机实例 (fric)
+
   Motor<MotorType> &motor_can2_;
-  //! CAN1上的电机实例 (trig)
+
   Motor<MotorType> &motor_can1_;
 
   LibXR::PID<float> pid_fric_;
   LibXR::PID<float> pid_trig_;
-  //! 时间间隔 (s)
-  LibXR::MicrosecondTimestamp::Duration dt_ = 0;
-  //! 上次在线时间
-  LibXR::MicrosecondTimestamp last_online_time_ = 0;
-  //! 当前时间
-  LibXR::MicrosecondTimestamp now_ = 0;
-  //! 命令模块实例
+
+  float dt_ = 0;
+  LibXR::MillisecondTimestamp last_online_time_ = 0;
+
   CMD &cmd_;
-  //! 发射控制线程
+
   LibXR::Thread thread_;
 
   LibXR::Semaphore semaphore_;
