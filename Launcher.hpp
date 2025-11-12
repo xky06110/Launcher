@@ -90,16 +90,19 @@ class Launcher : public LibXR::Application {
            CMD &cmd, uint32_t task_stack_depth,
            LibXR::PID<float>::Param pid_param_trig,
            LibXR::PID<float>::Param pid_param_fric,
-           Motor<MotorType> &motor_can1, Motor<MotorType> &motor_can2,
-           float num_trig_tooth, float trig_gear_ratio, float fric_radius,
-           float default_bullet_speed, uint32_t min_launch_delay)
+           typename MotorType::RMMotor *motor_fric_0,
+           typename MotorType::RMMotor *motor_fric_1,
+           typename MotorType::RMMotor *motor_trig, float num_trig_tooth,
+           float trig_gear_ratio, float fric_radius, float default_bullet_speed,
+           uint32_t min_launch_delay)
       : min_launch_delay_(min_launch_delay),
         default_bullet_speed_(default_bullet_speed),
         fric_radius_(fric_radius),
         trig_gear_ratio_(trig_gear_ratio),
         num_trig_tooth_(num_trig_tooth),
-        motor_can2_(motor_can2),
-        motor_can1_(motor_can1),
+        motor_fric_0_(motor_fric_0),
+        motor_fric_1_(motor_fric_1),
+        motor_trig_(motor_trig),
         pid_fric_(pid_param_fric),
         pid_trig_(pid_param_trig),
         cmd_(cmd) {
@@ -126,21 +129,22 @@ class Launcher : public LibXR::Application {
     referee_data_.heat_limit = 260.0f;
     referee_data_.heat_dissipation = 20.0f;
 
-    motor_can1_.Update();
-    motor_can2_.Update();
+    motor_fric_0_->Update();
+    motor_fric_0_->Update();
+    motor_trig_->Update();
   }
 
-  void ModeSelection(float default_bullet_speed_,bool is17mm) {
+  void ModeSelection(float default_bullet_speed_, bool is17mm) {
     switch (mod_) {
       case MOD::SAFE:
-      now_mod_ = MOD::SAFE;
+        now_mod_ = MOD::SAFE;
         break;
       case MOD::SINGLE:
-      now_mod_ = MOD::SINGLE;
+        now_mod_ = MOD::SINGLE;
         break;
       case MOD::BREAK_OUT:
       case MOD::AIM:
-      now_mod_ = MOD::BREAK_OUT;
+        now_mod_ = MOD::BREAK_OUT;
         break;
       default:
         break;
@@ -148,14 +152,14 @@ class Launcher : public LibXR::Application {
 
     last_mod_ = now_mod_;
     if (last_mod_ == MOD::SAFE && now_mod_ == MOD::SINGLE) {
-        fric_rpm_ = BulletSpeedToFricRpm(default_bullet_speed_, is17mm);
-        target_trig_angle_ = (M_2PI / num_trig_tooth_ + last_trig_angle_);
-        target_trig_rpm_ = 0.0f;
-        last_trig_angle_ = target_trig_angle_;
-    }else if(last_mod_ == MOD::SAFE && now_mod_ == MOD::BREAK_OUT){
-        fric_rpm_ = BulletSpeedToFricRpm(default_bullet_speed_, is17mm);
-        target_trig_rpm_ = 0.0f;
-        target_trig_angle_ = 0.0f;
+      fric_rpm_ = BulletSpeedToFricRpm(default_bullet_speed_, is17mm);
+      target_trig_angle_ = (M_2PI / num_trig_tooth_ + last_trig_angle_);
+      target_trig_rpm_ = 0.0f;
+      last_trig_angle_ = target_trig_angle_;
+    } else if (last_mod_ == MOD::SAFE && now_mod_ == MOD::BREAK_OUT) {
+      fric_rpm_ = BulletSpeedToFricRpm(default_bullet_speed_, is17mm);
+      target_trig_rpm_ = 0.0f;
+      target_trig_angle_ = 0.0f;
     }
   }
 
@@ -165,8 +169,7 @@ class Launcher : public LibXR::Application {
 
   void OutputToDynamics() {}
 
-  float BulletSpeedToFricRpm(float bullet_speed,
-                             bool is17mm) {
+  float BulletSpeedToFricRpm(float bullet_speed, bool is17mm) {
     if (bullet_speed == 0.0f) {
       return 0.0f;
     } else if (bullet_speed > 0.0f) {
@@ -224,9 +227,9 @@ class Launcher : public LibXR::Application {
 
   bool is_reset_ = false;
 
-  Motor<MotorType> &motor_can2_;
-
-  Motor<MotorType> &motor_can1_;
+  typename MotorType::RMMotor *motor_fric_0_;
+  typename MotorType::RMMotor *motor_fric_1_;
+  typename MotorType::RMMotor *motor_trig_;
 
   LibXR::PID<float> pid_fric_;
   LibXR::PID<float> pid_trig_;
