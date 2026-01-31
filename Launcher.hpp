@@ -59,7 +59,7 @@ depends:
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
-
+#include "Motor.hpp"
 #include "CMD.hpp"
 #include "RMMotor.hpp"
 #include "app_framework.hpp"
@@ -82,10 +82,10 @@ class Launcher {
  public:
   enum class TRIGMODE : uint8_t { RELAX, SAFE, SINGLE, CONTINUE, JAM };
 
-  enum class FRICMODE : uint8_t {
-    RELAX,
-    SAFE,
-    READY,
+  enum class LauncherEvent : uint8_t {
+    SET_FRICMODE_RELAX,
+    SET_FRICMODE_SAFE,
+    SET_FRICMODE_READY,
   };
 
   struct LauncherParam {
@@ -130,7 +130,7 @@ class Launcher {
         [](bool in_isr, Launcher *launcher, uint32_t event_id) {
           UNUSED(in_isr);
           UNUSED(event_id);
-          launcher->SetMode(static_cast<uint32_t>(FRICMODE::RELAX));
+          launcher->SetMode(static_cast<uint32_t>(LauncherEvent::SET_FRICMODE_RELAX));
           launcher->trig_mod_ = TRIGMODE::RELAX;
         },
         this);
@@ -143,11 +143,11 @@ class Launcher {
         },
         this);
 
-    launcher_event_.Register(static_cast<uint32_t>(FRICMODE::RELAX), callback);
+    launcher_event_.Register(static_cast<uint32_t>(LauncherEvent::SET_FRICMODE_RELAX), callback);
 
-    launcher_event_.Register(static_cast<uint32_t>(FRICMODE::SAFE), callback);
+    launcher_event_.Register(static_cast<uint32_t>(LauncherEvent::SET_FRICMODE_SAFE), callback);
 
-    launcher_event_.Register(static_cast<uint32_t>(FRICMODE::READY), callback);
+    launcher_event_.Register(static_cast<uint32_t>(LauncherEvent::SET_FRICMODE_READY), callback);
 
     auto launcher_cmd_callback = LibXR::Callback<LibXR::RawData &>::Create(
         [](bool in_isr, Launcher *Launcher, LibXR::RawData &raw_data) {
@@ -184,15 +184,18 @@ class Launcher {
    *
    */
   void Update() {
-
-    static float last_motor_angle = 0.0f;
-    static bool initialized = false;
-
     motor_fric_0_->Update();
     motor_fric_1_->Update();
     motor_trig_->Update();
 
-    float current_motor_angle = motor_trig_->GetAngle();
+    param_frirc_0_ = motor_fric_0_->GetFeedback();
+    param_frirc_1_ = motor_fric_1_->GetFeedback();
+    param_trig_ = motor_trig_->GetFeedback();
+
+    static float last_motor_angle = 0.0f;
+    static bool initialized = false;
+
+    float current_motor_angle = param_trig_.position;
 
     if (!initialized) {
       last_motor_angle = current_motor_angle;
@@ -203,45 +206,40 @@ class Launcher {
     float delta_trig_angle = LibXR::CycleValue<float>(current_motor_angle) -
                              LibXR::CycleValue<float>(last_motor_angle);
 
-    if (!motor_trig_->GetReverse()) {
-      trig_angle_ += delta_trig_angle / param_.trig_gear_ratio;
-    } else {
-      trig_angle_ -= delta_trig_angle / param_.trig_gear_ratio;
-    }
+    trig_angle_ += delta_trig_angle / param_.trig_gear_ratio;
     last_motor_angle = current_motor_angle;
+
   }
   void FricControl() {
-    switch (fric_mod_) {
-      case FRICMODE::RELAX: {
-        motor_fric_0_->CurrentControl(0);
-        motor_fric_1_->CurrentControl(0);
+    switch (fric_event_) {
+      case (LauncherEvent::SET_FRICMODE_RELAX): {
+        motor_fric_0_->Relax();
+        motor_fric_1_->Relax();
       } break;
-      case FRICMODE::SAFE: {
-        out_rpm_0_ = SoftTransition(0, motor_fric_0_->GetRPM());
-        out_rpm_1_ = SoftTransition(0, motor_fric_1_->GetRPM());
-        /*防止震荡*/
-        if (motor_fric_0_->GetRPM() < launcher::param::MIN_FRIC_RPM ||
-            motor_fric_1_->GetRPM() < launcher::param::MIN_FRIC_RPM) {
-          out_rpm_0_ = 0;
-          out_rpm_1_ = 0;
+      case LauncherEvent::SET_FRICMODE_SAFE: {
+        float out_rpm_0 = SoftTransition(0, param_frirc_0_.velocity);
+        float out_rpm_1 = SoftTransition(0, param_frirc_1_.velocity);
+        if (param_frirc_0_.velocity < 200 || param_frirc_1_.velocity < 200) {
+          out_rpm_0 = 0;
+          out_rpm_1 = 0;
         }
         fric_out_left_ =
-            pid_fric_0_.Calculate(out_rpm_0_, motor_fric_0_->GetRPM(), dt_);
+            pid_fric_0_.Calculate(out_rpm_0, param_frirc_0_.velocity, dt_);
         fric_out_right_ =
-            pid_fric_1_.Calculate(out_rpm_1_, motor_fric_1_->GetRPM(), dt_);
-        motor_fric_0_->CurrentControl(fric_out_left_);
-        motor_fric_1_->CurrentControl(fric_out_right_);
+            pid_fric_1_.Calculate(out_rpm_1, param_frirc_1_.velocity, dt_);
+        motor_fric_0_->Control(cmd_fric_0_);
+        motor_fric_1_->Control(cmd_fric_1_);
       } break;
-      case FRICMODE::READY: {
-        out_rpm_0_ = param_.fric_rpm_;
-        out_rpm_1_ = param_.fric_rpm_;
+      case LauncherEvent::SET_FRICMODE_READY: {
+        cmd_fric_0_.velocity = param_.fric_rpm_;
+        cmd_fric_1_.velocity = param_.fric_rpm_;
 
         fric_out_left_ =
-            pid_fric_0_.Calculate(out_rpm_0_, motor_fric_0_->GetRPM(), dt_);
+            pid_fric_0_.Calculate(out_rpm_0_, param_frirc_0_.velocity, dt_);
         fric_out_right_ =
-            pid_fric_1_.Calculate(out_rpm_1_, motor_fric_1_->GetRPM(), dt_);
-        motor_fric_0_->CurrentControl(fric_out_left_);
-        motor_fric_1_->CurrentControl(fric_out_right_);
+            pid_fric_1_.Calculate(out_rpm_1_, param_frirc_1_.velocity, dt_);
+        motor_fric_0_->Control(cmd_fric_0_);
+        motor_fric_1_->Control(cmd_fric_1_);
       }
       default:
         break;
@@ -253,58 +251,88 @@ class Launcher {
 
     switch (trig_mod_) {
       case TRIGMODE::RELAX:
-        motor_trig_->CurrentControl(0);
+        motor_trig_->Relax();
         break;
       case TRIGMODE::SAFE:
-        TrigAngleControl(trig_angle_);
+        cmd_trig_.position = trig_angle_;
+
         break;
+      case TRIGMODE::SINGLE: {
+        if (last_trig_mod_ == TRIGMODE::SAFE) {
+          cmd_trig_.position += launcher::param::TRIGSTEP;
+        }
+        last_trig_angle_ = cmd_trig_.position;
+      } break;
 
       case TRIGMODE::CONTINUE: {
         float since_last = (now - last_trig_time_).ToSecondf();
         if (param_.trig_freq_ > 0.0f) {
           float trig_speed = 1.0f / param_.trig_freq_;
           if (since_last >= trig_speed) {
-            target_trig_angle_ = trig_angle_ + launcher::param::TRIGSTEP;
+            cmd_trig_.position = launcher::param::TRIGSTEP;
             last_trig_time_ = now;
           }
         }
-        TrigAngleControl(target_trig_angle_);
 
-        last_trig_angle_ = target_trig_angle_;
+        last_trig_angle_ = cmd_trig_.position;
       } break;
 
       default:
         break;
     }
+    float plate_omega_ref = pid_trig_angle_.Calculate(
+        cmd_trig_.position, trig_angle_,
+        param_trig_.omega / param_.trig_gear_ratio, dt_);
+    float motor_omega_ref = std::clamp(
+        plate_omega_ref,
+        static_cast<float>(-1.5 * M_2PI * param_.trig_freq_ / param_.num_trig_tooth),
+        static_cast<float>(1.5 * M_2PI *param_. trig_freq_ / param_.num_trig_tooth));
+    cmd_trig_.velocity = pid_trig_sp_.Calculate(
+        motor_omega_ref, param_trig_.omega / param_.trig_gear_ratio, dt_);
+
+    motor_trig_->Control(cmd_trig_);
+
     last_trig_mod_ = trig_mod_;
   }
   void SetMode(uint32_t mode) {
+    mutex_.Lock();
+    pid_fric_0_.Reset();
+    pid_fric_1_.Reset();
+    pid_trig_angle_.Reset();
+    pid_trig_sp_.Reset();
+    mutex_.Unlock();
+
     switch (mode) {
       case 0:
-        fric_mod_ = FRICMODE::RELAX;
-        trig_mod_ = TRIGMODE::RELAX;
-        break;
-      case 1:
-        fric_mod_ = FRICMODE::READY;
+        fric_event_= LauncherEvent::SET_FRICMODE_RELAX;
         trig_mod_ = TRIGMODE::SAFE;
         break;
+      case 1:
+      fric_event_ = LauncherEvent::SET_FRICMODE_RELAX;
+        trig_mod_ = TRIGMODE::SINGLE;
+        break;
       case 2:
-        fric_mod_ = FRICMODE::READY;
+      fric_event_ = LauncherEvent::SET_FRICMODE_READY;
         trig_mod_ = TRIGMODE::CONTINUE;
         break;
       default:
         break;
+
     }
   }
+  float SoftTransition(float target, float cur) {
+    constexpr float TAU = 0.15f;
+    float alpha = dt_ / (TAU + dt_);
+    return cur + alpha * (target - cur);
+  }
+
   LibXR::Event &GetEvent() { return launcher_event_; }
 
  private:
   LauncherParam param_;
   TRIGMODE last_trig_mod_ = TRIGMODE::RELAX;
   TRIGMODE trig_mod_ = TRIGMODE::RELAX;
-  FRICMODE fric_mod_ = FRICMODE::RELAX;
 
-  float target_trig_angle_ = 0.0f;
   float trig_angle_ = 0.0f;
   float last_trig_angle_ = 0.0f;
   LibXR::MillisecondTimestamp last_trig_time_ = 0;
@@ -336,21 +364,22 @@ class Launcher {
   float fric_out_right_ = 0.0f;
   float out_rpm_0_ = 0;
   float out_rpm_1_ = 0;
-  /*---------------------工具函数--------------------------------------------------*/
-  void TrigAngleControl(float target_angle) {
-    float plate_omega_ref = pid_trig_angle_.Calculate(
-        target_angle, trig_angle_,
-        motor_trig_->GetOmega() / param_.trig_gear_ratio, dt_);
-    float motor_omega_ref = plate_omega_ref;
-    float out = pid_trig_sp_.Calculate(
-        motor_omega_ref, motor_trig_->GetOmega() / param_.trig_gear_ratio, dt_);
+  Motor::Feedback param_frirc_0_;
+  Motor::Feedback param_frirc_1_;
+  Motor::Feedback param_trig_;
+  Motor::MotorCmd cmd_fric_0_ =
+      Motor::MotorCmd{.mode = Motor::ControlMode::MODE_CURRENT,
+                      .reduction_ratio = 19.0f,
+                      .velocity = 0};
+  Motor::MotorCmd cmd_fric_1_ =
+      Motor::MotorCmd{.mode = Motor::ControlMode::MODE_CURRENT,
+                      .reduction_ratio = 19.0f,
+                      .velocity = 0};
+  Motor::MotorCmd cmd_trig_ =
+      Motor::MotorCmd{.mode = Motor::ControlMode::MODE_CURRENT,
+                      .reduction_ratio = 36.0f,
+                      .velocity = 0};
+  LauncherEvent fric_event_ = LauncherEvent::SET_FRICMODE_RELAX;
 
-    motor_trig_->CurrentControl(out);
-  }
   /*指数缓变*/
-  float SoftTransition(float target, float cur) {
-    constexpr float TAU = 0.15f;
-    float alpha = dt_ / (TAU + dt_);
-    return cur + alpha * (target - cur);
-  }
 };
